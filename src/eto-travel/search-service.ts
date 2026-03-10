@@ -99,10 +99,6 @@ export class EtoTravelSearchService implements TourSearchClient {
         continue;
       }
 
-      if (await startsWithBrokenCard(page, resultSelector)) {
-        continue;
-      }
-
       return readFirstResult(page, attempt);
     }
 
@@ -327,7 +323,7 @@ async function findFirstExistingSelector(page: BrowserPage, selectors: readonly 
 }
 
 async function readFirstResult(page: BrowserPage, attempt: SearchAttempt): Promise<TourSearchResult> {
-  // Берем первую полноценную карточку, а не просто первый DOM-элемент выдачи.
+  // Перебираем все карточки и берем первую валидную, чтобы битый первый элемент не запускал ложный fallback.
   const resultSelector = await findFirstExistingSelector(page, SEARCH_SELECTORS.resultCard);
 
   if (!resultSelector) {
@@ -514,21 +510,6 @@ async function hasNoResults(page: BrowserPage): Promise<boolean> {
   const bodyText = await page.locator('body').first().textContent();
 
   return bodyText?.includes('Ничего не найдено') ?? false;
-}
-
-async function startsWithBrokenCard(page: BrowserPage, resultSelector: string): Promise<boolean> {
-  const cards = page.locator(resultSelector);
-  const count = await cards.count();
-
-  if (count === 0) {
-    return true;
-  }
-
-  const firstCard = cards.first();
-  const title = await readTextFromNestedSelectors(firstCard, SEARCH_SELECTORS.resultTitle);
-  const priceValue = await readTextFromNestedSelectors(firstCard, SEARCH_SELECTORS.resultPriceValue);
-
-  return !title?.trim() || !priceValue?.trim();
 }
 
 async function readTouristCount(page: BrowserPage, selector: string): Promise<number> {

@@ -72,6 +72,45 @@ describe('EtoTravelSearchService', () => {
     expect(browserLauncher.pageState.gotoCalls).toBe(1);
   });
 
+  it('preserves the requested month when the first attempt succeeds', async () => {
+    // Если первый поиск успешен, month не должен попадать в relaxedFilters просто из-за лишнего fallback-плана.
+    const browserLauncher = new FakeBrowserLauncher(createBaseSelectorMap());
+    const service = new EtoTravelSearchService(browserLauncher);
+
+    const result = await service.searchAnyTour({
+      destination: 'Турция',
+      departureCity: 'С.Петербург',
+      adults: 2,
+      nights: 7,
+      month: 'апрель',
+      rawQuery: 'Турция из Петербурга в апреле на неделю'
+    });
+
+    expect(result.appliedFilters.month).toBe('апрель');
+    expect(result.relaxedFilters).toEqual([]);
+  });
+
+  it('does not relax filters when the first card is broken but the next card is valid', async () => {
+    // Виджет иногда рендерит битую первую карточку, но это не должно автоматически включать fallback по month.
+    const browserLauncher = new FakeBrowserLauncher(createBaseSelectorMap(), {
+      '.TVSResultItemTitle': ['', 'Viva Магнолия'],
+      '.TVSResultItemPriceValue': ['', '29 027']
+    });
+    const service = new EtoTravelSearchService(browserLauncher);
+
+    const result = await service.searchAnyTour({
+      destination: 'Турция',
+      departureCity: 'С.Петербург',
+      adults: 2,
+      nights: 7,
+      month: 'апрель',
+      rawQuery: 'Турция из Петербурга в апреле на неделю'
+    });
+
+    expect(result.relaxedFilters).toEqual([]);
+    expect(result.appliedFilters.month).toBe('апрель');
+  });
+
   it('skips destination-mismatched cards and fails instead of returning another resort', async () => {
     // Нерелевантную карточку по Ессентукам нельзя возвращать, если пользователь явно искал Сочи.
     const browserLauncher = new FakeBrowserLauncher(createBaseSelectorMap(), {
@@ -137,7 +176,7 @@ class FakeBrowserLauncher implements BrowserLauncher {
 
   constructor(
     private readonly selectorCounts: Record<string, number>,
-    private readonly textOverrides: Record<string, string> = {}
+    private readonly textOverrides: Record<string, string | string[]> = {}
   ) {}
 
   async launch(): Promise<BrowserContextHandle> {
@@ -159,7 +198,7 @@ class FakeBrowserPage implements BrowserPage {
       totalWaitMs: number;
       gotoCalls: number;
     },
-    private readonly textOverrides: Record<string, string>
+    private readonly textOverrides: Record<string, string | string[]>
   ) {}
 
   async goto(): Promise<void> {
@@ -187,7 +226,7 @@ class FakeLocator implements BrowserLocator {
       totalWaitMs: number;
       gotoCalls: number;
     },
-    private readonly textOverrides: Record<string, string>
+    private readonly textOverrides: Record<string, string | string[]>
   ) {}
 
   async count(): Promise<number> {
@@ -196,17 +235,27 @@ class FakeLocator implements BrowserLocator {
   }
 
   first(): BrowserElement {
-    return new FakeElement(this.selector, this.selectorCounts, this.pageState, this.textOverrides);
+    return new FakeElement(this.selector, 0, this.selectorCounts, this.pageState, this.textOverrides);
   }
 
   nth(): BrowserElement {
-    return new FakeElement(this.selector, this.selectorCounts, this.pageState, this.textOverrides);
+    return new FakeElement(this.selector, 1, this.selectorCounts, this.pageState, this.textOverrides);
   }
+}
+
+function resolveOverrideValue(override: string | string[] | undefined, index: number): string | undefined {
+  // Для multi-card тестов даем возможность задавать разный текст для первой и второй карточки.
+  if (Array.isArray(override)) {
+    return override[index];
+  }
+
+  return override;
 }
 
 class FakeElement implements BrowserElement {
   constructor(
     private readonly selector: string,
+    private readonly index: number,
     private readonly selectorCounts: Record<string, number>,
     private readonly pageState: {
       fillCalls: Array<{ selector: string; value: string }>;
@@ -214,7 +263,7 @@ class FakeElement implements BrowserElement {
       totalWaitMs: number;
       gotoCalls: number;
     },
-    private readonly textOverrides: Record<string, string>
+    private readonly textOverrides: Record<string, string | string[]>
   ) {}
 
   async click(): Promise<void> {
@@ -227,7 +276,7 @@ class FakeElement implements BrowserElement {
 
   async textContent(): Promise<string | null> {
     // Возвращаем реальные поля под фактические live-селекторы результата и popup-элементов.
-    const overrideValue = this.textOverrides[this.selector];
+    const overrideValue = resolveOverrideValue(this.textOverrides[this.selector], this.index);
 
     if (overrideValue) {
       return overrideValue;
@@ -262,8 +311,10 @@ class FakeElement implements BrowserElement {
     }
 
     if (this.selector.includes('ComplexListItem')) {
-      if (this.textOverrides[this.selector]) {
-        return this.textOverrides[this.selector];
+      const complexListOverride = resolveOverrideValue(this.textOverrides[this.selector], this.index);
+
+      if (complexListOverride) {
+        return complexListOverride;
       }
 
       return 'ТурцияАэропортАнталья';
