@@ -54,6 +54,23 @@ describe('EtoTravelSearchService', () => {
 
     expect(browserLauncher.pageState.fillCalls).toEqual([]);
   });
+
+  it('does not reload the search page before the first attempt', async () => {
+    // Первый точный прогон должен использовать уже открытую страницу, иначе время ответа MCP уходит на лишний reload.
+    const browserLauncher = new FakeBrowserLauncher(createBaseSelectorMap());
+    const service = new EtoTravelSearchService(browserLauncher);
+
+    await service.searchAnyTour({
+      destination: 'Турция',
+      departureCity: null,
+      adults: 2,
+      nights: 7,
+      month: null,
+      rawQuery: 'Турция на 7 ночей для 2 взрослых'
+    });
+
+    expect(browserLauncher.pageState.gotoCalls).toBe(1);
+  });
 });
 
 function createBaseSelectorMap(): Record<string, number> {
@@ -90,7 +107,9 @@ function createBaseSelectorMap(): Record<string, number> {
 class FakeBrowserLauncher implements BrowserLauncher {
   readonly pageState = {
     fillCalls: [] as Array<{ selector: string; value: string }>,
-    clickCalls: [] as string[]
+    clickCalls: [] as string[],
+    totalWaitMs: 0,
+    gotoCalls: 0
   };
 
   constructor(private readonly selectorCounts: Record<string, number>) {}
@@ -111,12 +130,18 @@ class FakeBrowserPage implements BrowserPage {
     private readonly pageState: {
       fillCalls: Array<{ selector: string; value: string }>;
       clickCalls: string[];
+      totalWaitMs: number;
+      gotoCalls: number;
     }
   ) {}
 
-  async goto(): Promise<void> {}
+  async goto(): Promise<void> {
+    this.pageState.gotoCalls += 1;
+  }
 
-  async waitForTimeout(): Promise<void> {}
+  async waitForTimeout(timeout: number): Promise<void> {
+    this.pageState.totalWaitMs += timeout;
+  }
 
   async waitForSelector(): Promise<void> {}
 
@@ -132,6 +157,8 @@ class FakeLocator implements BrowserLocator {
     private readonly pageState: {
       fillCalls: Array<{ selector: string; value: string }>;
       clickCalls: string[];
+      totalWaitMs: number;
+      gotoCalls: number;
     }
   ) {}
 
@@ -156,6 +183,8 @@ class FakeElement implements BrowserElement {
     private readonly pageState: {
       fillCalls: Array<{ selector: string; value: string }>;
       clickCalls: string[];
+      totalWaitMs: number;
+      gotoCalls: number;
     }
   ) {}
 

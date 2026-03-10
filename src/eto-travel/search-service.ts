@@ -77,11 +77,15 @@ export class EtoTravelSearchService implements TourSearchClient {
     // Сначала открываем страницу и дожидаемся полной отрисовки встроенного виджета.
     await page.goto(SEARCH_PAGE_URL, { waitUntil: 'domcontentloaded', timeout: DEFAULT_WAIT_TIMEOUT_MS });
     await waitForAnySelector(page, SEARCH_SELECTORS.widgetRoot, DEFAULT_WAIT_TIMEOUT_MS);
-    await page.waitForTimeout(SHORT_UI_PAUSE_MS * 5);
+    await page.waitForTimeout(SHORT_UI_PAUSE_MS * 3);
 
   // Запускаем каскад попыток: сначала точные фильтры, затем мягкое ослабление проблемных полей.
-    for (const attempt of searchAttempts) {
-      await resetSearchPage(page);
+    for (const [attemptIndex, attempt] of searchAttempts.entries()) {
+      // Повторный reload нужен только перед fallback-попытками; первый точный прогон использует уже открытую страницу.
+      if (attemptIndex > 0) {
+        await resetSearchPage(page);
+      }
+
       await applySafeFilters(page, attempt);
       await triggerSearch(page);
 
@@ -281,7 +285,7 @@ async function resetSearchPage(page: BrowserPage): Promise<void> {
   // Полный reload между попытками исключает накопление состояния popup-виджета между search attempts.
   await page.goto(SEARCH_PAGE_URL, { waitUntil: 'domcontentloaded', timeout: DEFAULT_WAIT_TIMEOUT_MS });
   await waitForAnySelector(page, SEARCH_SELECTORS.widgetRoot, DEFAULT_WAIT_TIMEOUT_MS);
-  await page.waitForTimeout(SHORT_UI_PAUSE_MS * 3);
+  await page.waitForTimeout(SHORT_UI_PAUSE_MS * 2);
 }
 
 async function ensureSelectorExists(page: BrowserPage, selectors: readonly string[], errorMessage: string): Promise<string> {
