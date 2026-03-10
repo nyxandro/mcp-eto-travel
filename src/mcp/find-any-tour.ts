@@ -4,6 +4,7 @@
  * - buildTourCardText: formats a user-friendly tour card for plain-text MCP clients
  * - validateSearchInput: checks whether critical search fields are present before UI automation starts
  * - ToolContext: typed MCP tool context with optional logging helper from the SDK runtime
+ * - validateSearchInputOrThrow: reusable MCP input validation for single and multiple tour tools
  */
 
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
@@ -28,7 +29,7 @@ type ToolContext = RequestHandlerExtra<ServerRequest, ServerNotification> & {
 export function createFindAnyTourHandler(searchClient: TourSearchClient) {
   return async (input: TourSearchInput, context: ToolContext): Promise<CallToolResult> => {
     // Сначала валидируем обязательные для осмысленного подбора поля, чтобы не делать дорогой UI-поиск вслепую.
-    const validationError = validateSearchInput(input);
+    const validationError = validateSearchInputOrThrow(input);
 
     if (validationError) {
       return validationError;
@@ -63,7 +64,7 @@ export function createFindAnyTourHandler(searchClient: TourSearchClient) {
   };
 }
 
-function validateSearchInput(input: TourSearchInput): CallToolResult | null {
+export function validateSearchInputOrThrow(input: TourSearchInput): CallToolResult | null {
   // Проверяем только критичные поля, без которых подбор слишком неточный и может ввести клиента в заблуждение.
   const missingFields: string[] = [];
 

@@ -111,6 +111,43 @@ describe('EtoTravelSearchService', () => {
     expect(result.appliedFilters.month).toBe('апрель');
   });
 
+  it('returns several categorized options for multi-tour search', async () => {
+    // Multi-option режим должен собирать несколько валидных карточек из одной выдачи, а не только первый попавшийся тур.
+    const browserLauncher = new FakeBrowserLauncher(createBaseSelectorMap(), {
+      '.TVSResultItemTitle': ['Budget Hotel', 'Comfort Hotel', 'Luxury Resort'],
+      '.TVSResultItemPriceValue': ['90 000', '115 000', '180 000'],
+      '.TVSResultItemSubTitle': ['Аланья, 500 м до моря', 'Сиде, 300 м до моря', 'Белек, 100 м до моря'],
+      '.TVSHotelInfoRating': ['4.0', '4.5', '4.9'],
+      '.TVSResultItemDescription': ['Самый доступный вариант', 'Сбалансированный вариант', 'Более комфортный вариант'],
+      '.TVHotelInfoTitleLink': [
+        'https://tourcart.ru/hotel?budget',
+        'https://tourcart.ru/hotel?optimal',
+        'https://tourcart.ru/hotel?premium'
+      ],
+      '.TVDepartureTableItemControl': 'Москва',
+      '.TVCalendarSheetControl': 'Июнь2026'
+    }, {
+      '.TVSResultItem': 3,
+      '.TVHotelInfoTitleLink': 3
+    });
+    const service = new EtoTravelSearchService(browserLauncher);
+
+    const result = await service.searchTourOptions({
+      destination: 'Турция',
+      departureCity: 'Москва',
+      adults: 2,
+      nights: 7,
+      month: 'июнь',
+      rawQuery: 'Подбери несколько туров в Турцию из Москвы на июнь'
+    });
+
+    expect(result.tours.map((tour) => [tour.title, tour.category])).toEqual([
+      ['Budget Hotel', 'budget'],
+      ['Comfort Hotel', 'optimal'],
+      ['Luxury Resort', 'premium']
+    ]);
+  });
+
   it('skips destination-mismatched cards and fails instead of returning another resort', async () => {
     // Нерелевантную карточку по Ессентукам нельзя возвращать, если пользователь явно искал Сочи.
     const browserLauncher = new FakeBrowserLauncher(createBaseSelectorMap(), {
@@ -131,7 +168,7 @@ describe('EtoTravelSearchService', () => {
         month: 'апрель',
         rawQuery: 'найти тур в Сочи на двоих на неделю в апреле из Москвы'
       })
-    ).rejects.toThrow('No complete tour cards were found in search results');
+    ).rejects.toThrow('No tours were found for the requested filters, including relaxed attempts');
   });
 });
 
@@ -176,12 +213,13 @@ class FakeBrowserLauncher implements BrowserLauncher {
 
   constructor(
     private readonly selectorCounts: Record<string, number>,
-    private readonly textOverrides: Record<string, string | string[]> = {}
+    private readonly textOverrides: Record<string, string | string[]> = {},
+    private readonly countOverrides: Record<string, number> = {}
   ) {}
 
   async launch(): Promise<BrowserContextHandle> {
     return {
-      page: new FakeBrowserPage(this.selectorCounts, this.pageState, this.textOverrides),
+      page: new FakeBrowserPage(this.selectorCounts, this.pageState, this.textOverrides, this.countOverrides),
       async close(): Promise<void> {
         // Пустой close достаточен для unit/integration-like проверки orchestration-логики.
       }
@@ -198,7 +236,8 @@ class FakeBrowserPage implements BrowserPage {
       totalWaitMs: number;
       gotoCalls: number;
     },
-    private readonly textOverrides: Record<string, string | string[]>
+    private readonly textOverrides: Record<string, string | string[]>,
+    private readonly countOverrides: Record<string, number>
   ) {}
 
   async goto(): Promise<void> {
@@ -212,7 +251,7 @@ class FakeBrowserPage implements BrowserPage {
   async waitForSelector(): Promise<void> {}
 
   locator(selector: string): BrowserLocator {
-    return new FakeLocator(selector, this.selectorCounts, this.pageState, this.textOverrides);
+    return new FakeLocator(selector, this.selectorCounts, this.pageState, this.textOverrides, this.countOverrides);
   }
 }
 
@@ -226,20 +265,29 @@ class FakeLocator implements BrowserLocator {
       totalWaitMs: number;
       gotoCalls: number;
     },
-    private readonly textOverrides: Record<string, string | string[]>
+    private readonly textOverrides: Record<string, string | string[]>,
+    private readonly countOverrides: Record<string, number>,
+    private readonly forcedIndex: number | null = null
   ) {}
 
   async count(): Promise<number> {
     // Каждая проверка count управляется картой селекторов, чтобы тесты имитировали разные DOM-сценарии.
-    return this.selectorCounts[this.selector] ?? 0;
+    return this.countOverrides[this.selector] ?? this.selectorCounts[this.selector] ?? 0;
   }
 
   first(): BrowserElement {
-    return new FakeElement(this.selector, 0, this.selectorCounts, this.pageState, this.textOverrides);
+    return new FakeElement(
+      this.selector,
+      this.forcedIndex ?? 0,
+      this.selectorCounts,
+      this.pageState,
+      this.textOverrides,
+      this.countOverrides
+    );
   }
 
-  nth(): BrowserElement {
-    return new FakeElement(this.selector, 1, this.selectorCounts, this.pageState, this.textOverrides);
+  nth(index: number): BrowserElement {
+    return new FakeElement(this.selector, index, this.selectorCounts, this.pageState, this.textOverrides, this.countOverrides);
   }
 }
 
@@ -263,7 +311,8 @@ class FakeElement implements BrowserElement {
       totalWaitMs: number;
       gotoCalls: number;
     },
-    private readonly textOverrides: Record<string, string | string[]>
+    private readonly textOverrides: Record<string, string | string[]>,
+    private readonly countOverrides: Record<string, number>
   ) {}
 
   async click(): Promise<void> {
@@ -338,7 +387,9 @@ class FakeElement implements BrowserElement {
   async getAttribute(name: string): Promise<string | null> {
     // Ссылка на карточку должна читаться из дочернего anchor-элемента.
     if (name === 'href') {
-      return 'https://tourcart.ru/hotel?cd=99414988#!/hotel=viva-magnoliya';
+      const hrefOverride = resolveOverrideValue(this.textOverrides['.TVHotelInfoTitleLink'], this.index);
+
+      return hrefOverride ?? 'https://tourcart.ru/hotel?cd=99414988#!/hotel=viva-magnoliya';
     }
 
     return null;
@@ -364,6 +415,6 @@ class FakeElement implements BrowserElement {
       nextCounts['calendar-panel-april'] = 1;
     }
 
-    return new FakeLocator(childSelector, nextCounts, this.pageState, this.textOverrides);
+    return new FakeLocator(childSelector, nextCounts, this.pageState, this.textOverrides, this.countOverrides, this.index);
   }
 }

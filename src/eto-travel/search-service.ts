@@ -5,13 +5,15 @@
  * - SEARCH_PAGE_URL: main search page for tours
  * - SEARCH_SELECTORS: selector map for widget controls and result cards
  * - FORM_BEHAVIOR: rules for when filters can be safely changed
+ * - buildSearchResults: executes search attempts and reads one or several valid result cards
  */
 
 import { normalizeDepartureCity, normalizeDestination } from '../shared/query-parser.js';
-import type { TourSearchClient, TourSearchInput, TourSearchResult } from '../shared/types.js';
+import type { TourSearchClient, TourSearchCollection, TourSearchInput, TourSearchResult } from '../shared/types.js';
 import type { BrowserContextHandle, BrowserElement, BrowserLauncher, BrowserPage } from './browser.js';
 import { createSearchAttempts, type SearchAttempt } from './search-plan.js';
-import { normalizeTourResult } from './tour-normalizer.js';
+import { readFirstResult, readTopResults } from './search-results-reader.js';
+import { buildTourCollection } from './tour-collection.js';
 
 const SEARCH_PAGE_URL = 'https://eto.travel/search/';
 const SHORT_UI_PAUSE_MS = 1_000;
@@ -61,7 +63,9 @@ export class EtoTravelSearchService implements TourSearchClient {
     const browserSession = await this.browserLauncher.launch();
 
     try {
-      return await this.searchWithBrowser(browserSession, parsedQuery);
+      const results = await this.searchWithBrowser(browserSession, parsedQuery, 1);
+
+      return results[0]!;
     } catch (error) {
       // Ошибка поднимается с контекстом, чтобы оператор MCP видел, на каком этапе сломался сценарий.
       throw new Error(`eto.travel search failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -70,40 +74,61 @@ export class EtoTravelSearchService implements TourSearchClient {
     }
   }
 
-  private async searchWithBrowser(browserSession: BrowserContextHandle, parsedQuery: TourSearchInput): Promise<TourSearchResult> {
-    const { page } = browserSession;
-    const searchAttempts = createSearchAttempts(parsedQuery);
+  async searchTourOptions(input: TourSearchInput): Promise<TourSearchCollection> {
+    // Многовариантный поиск переиспользует тот же браузерный сценарий, но читает несколько валидных карточек.
+    const parsedQuery = normalizeSearchInput(input);
+    const browserSession = await this.browserLauncher.launch();
 
-    // Сначала открываем страницу и дожидаемся полной отрисовки встроенного виджета.
-    await page.goto(SEARCH_PAGE_URL, { waitUntil: 'domcontentloaded', timeout: DEFAULT_WAIT_TIMEOUT_MS });
-    await waitForAnySelector(page, SEARCH_SELECTORS.widgetRoot, DEFAULT_WAIT_TIMEOUT_MS);
-    await page.waitForTimeout(SHORT_UI_PAUSE_MS * 3);
+    try {
+      const results = await this.searchWithBrowser(browserSession, parsedQuery, 3);
+
+      return buildTourCollection(results);
+    } catch (error) {
+      throw new Error(`eto.travel search failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      await browserSession.close();
+    }
+  }
+
+  private async searchWithBrowser(browserSession: BrowserContextHandle, parsedQuery: TourSearchInput, resultLimit: number): Promise<TourSearchResult[]> {
+    const { page } = browserSession;
+
+    return buildSearchResults(page, parsedQuery, resultLimit);
+  }
+}
+
+async function buildSearchResults(page: BrowserPage, parsedQuery: TourSearchInput, resultLimit: number): Promise<TourSearchResult[]> {
+  const searchAttempts = createSearchAttempts(parsedQuery);
+
+  // Сначала открываем страницу и дожидаемся полной отрисовки встроенного виджета.
+  await page.goto(SEARCH_PAGE_URL, { waitUntil: 'domcontentloaded', timeout: DEFAULT_WAIT_TIMEOUT_MS });
+  await waitForAnySelector(page, SEARCH_SELECTORS.widgetRoot, DEFAULT_WAIT_TIMEOUT_MS);
+  await page.waitForTimeout(SHORT_UI_PAUSE_MS * 3);
 
   // Запускаем каскад попыток: сначала точные фильтры, затем мягкое ослабление проблемных полей.
-    for (const [attemptIndex, attempt] of searchAttempts.entries()) {
-      // Повторный reload нужен только перед fallback-попытками; первый точный прогон использует уже открытую страницу.
-      if (attemptIndex > 0) {
-        await resetSearchPage(page);
-      }
-
-      await applySafeFilters(page, attempt);
-      await triggerSearch(page);
-
-      if (await hasNoResults(page)) {
-        continue;
-      }
-
-      const resultSelector = await findFirstExistingSelector(page, SEARCH_SELECTORS.resultCard);
-
-      if (!resultSelector) {
-        continue;
-      }
-
-      return readFirstResult(page, attempt);
+  for (const [attemptIndex, attempt] of searchAttempts.entries()) {
+    // Повторный reload нужен только перед fallback-попытками; первый точный прогон использует уже открытую страницу.
+    if (attemptIndex > 0) {
+      await resetSearchPage(page);
     }
 
-    throw new Error('No tours were found for the requested filters, including relaxed attempts');
+    await applySafeFilters(page, attempt);
+    await triggerSearch(page);
+
+    if (await hasNoResults(page)) {
+      continue;
+    }
+
+    try {
+      return resultLimit === 1
+        ? [await readFirstResult(page, attempt, SEARCH_SELECTORS)]
+        : await readTopResults(page, attempt, SEARCH_SELECTORS, resultLimit);
+    } catch {
+      // Если на текущей попытке нет пригодных карточек, идем к следующему fallback-набору фильтров.
+    }
   }
+
+  throw new Error('No tours were found for the requested filters, including relaxed attempts');
 }
 
 function normalizeSearchInput(input: TourSearchInput): TourSearchInput {
@@ -320,138 +345,6 @@ async function findFirstExistingSelector(page: BrowserPage, selectors: readonly 
   }
 
   return null;
-}
-
-async function readFirstResult(page: BrowserPage, attempt: SearchAttempt): Promise<TourSearchResult> {
-  // Перебираем все карточки и берем первую валидную, чтобы битый первый элемент не запускал ложный fallback.
-  const resultSelector = await findFirstExistingSelector(page, SEARCH_SELECTORS.resultCard);
-
-  if (!resultSelector) {
-    throw new Error('Tour results were not found on eto.travel');
-  }
-
-  const cards = page.locator(resultSelector);
-  const count = await cards.count();
-
-  for (let index = 0; index < count; index += 1) {
-    const candidateCard = cards.nth(index);
-
-    try {
-      return await buildResultFromCard(candidateCard, attempt);
-    } catch {
-      // Неполные карточки пропускаем и ищем следующий валидный результат.
-    }
-  }
-
-  throw new Error('No complete tour cards were found in search results');
-}
-
-async function buildResultFromCard(card: BrowserElement, attempt: SearchAttempt): Promise<TourSearchResult> {
-  const title = await readTextFromNestedSelectors(card, SEARCH_SELECTORS.resultTitle);
-  const priceValue = await readTextFromNestedSelectors(card, SEARCH_SELECTORS.resultPriceValue);
-  const priceCurrency = await readTextFromNestedSelectors(card, SEARCH_SELECTORS.resultPriceCurrency);
-  const subtitle = await readTextFromNestedSelectors(card, SEARCH_SELECTORS.resultSubtitle);
-  const rating = await readTextFromNestedSelectors(card, SEARCH_SELECTORS.resultRating);
-  const description = await readTextFromNestedSelectors(card, SEARCH_SELECTORS.resultDescription);
-  const imageUrl = await readImageUrlFromNestedSelectors(card, SEARCH_SELECTORS.resultImage);
-  const href = await readAttributeFromNestedSelectors(card, SEARCH_SELECTORS.resultLink, 'href');
-
-  return normalizeTourResult({
-    title,
-    hotelName: title,
-    priceText: formatPrice(priceValue, priceCurrency),
-    dateText: subtitle,
-    ratingText: rating,
-    descriptionText: description,
-    imageUrl,
-    href,
-    appliedFilters: {
-      destination: attempt.destination,
-      departureCity: attempt.departureCity,
-      adults: attempt.adults,
-      nights: attempt.nights,
-      month: attempt.month
-    },
-    relaxedFilters: attempt.relaxedFilters
-  });
-}
-
-function formatPrice(priceValue: string | null, priceCurrency: string | null): string | null {
-  // Цена собирается из раздельных DOM-узлов, поэтому объединяем их только когда есть основная числовая часть.
-  if (!priceValue?.trim()) {
-    return null;
-  }
-
-  const normalizedValue = priceValue.replace(/\s+/g, ' ').trim();
-  const normalizedCurrency = priceCurrency?.replace(/\s+/g, ' ').trim() ?? '';
-
-  return normalizedCurrency ? `${normalizedValue} ${normalizedCurrency}` : normalizedValue;
-}
-
-async function readTextFromNestedSelectors(card: BrowserElement, selectors: readonly string[]): Promise<string | null> {
-  // Читаем первый найденный текстовый узел и не придумываем значения, если его нет в DOM.
-  for (const selector of selectors) {
-    const nestedLocator = card.locator(selector);
-    const count = await nestedLocator.count();
-
-    if (count > 0) {
-      const textValue = await nestedLocator.first().textContent();
-
-      if (textValue?.trim()) {
-        return textValue;
-      }
-    }
-  }
-
-  return null;
-}
-
-async function readImageUrlFromNestedSelectors(card: BrowserElement, selectors: readonly string[]): Promise<string | null> {
-  // Картинка хранится в inline-style background-image, поэтому читаем style и извлекаем URL регулярным выражением.
-  for (const selector of selectors) {
-    const nestedLocator = card.locator(selector);
-    const count = await nestedLocator.count();
-
-    if (count > 0) {
-      const styleValue = await nestedLocator.first().evaluate((node) => node.getAttribute('style'));
-      const imageUrl = extractBackgroundImageUrl(styleValue);
-
-      if (imageUrl?.trim()) {
-        return imageUrl;
-      }
-    }
-  }
-
-  return null;
-}
-
-async function readAttributeFromNestedSelectors(card: BrowserElement, selectors: readonly string[], attributeName: string): Promise<string | null> {
-  // Ссылку и другие атрибуты читаем по нескольким селекторам, так как карточки имеют разные шаблоны в зависимости от режима поиска.
-  for (const selector of selectors) {
-    const nestedLocator = card.locator(selector);
-    const count = await nestedLocator.count();
-
-    if (count > 0) {
-      const attributeValue = await nestedLocator.first().getAttribute(attributeName);
-
-      if (attributeValue?.trim()) {
-        return attributeValue;
-      }
-    }
-  }
-
-  return null;
-}
-
-function extractBackgroundImageUrl(styleValue: string | null): string | null {
-  // Background-image приходит в виде url("...") и требует отдельного разбора перед возвратом в MCP.
-  if (!styleValue) {
-    return null;
-  }
-
-  const match = styleValue.match(/background-image:\s*url\(["']?(.*?)["']?\)/i);
-
-  return match?.[1] ?? null;
 }
 
 async function findElementByText(page: BrowserPage, selector: string, text: string): Promise<BrowserElement | null> {

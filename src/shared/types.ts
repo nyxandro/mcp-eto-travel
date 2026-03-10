@@ -3,6 +3,8 @@
  * - TourSearchInput: structured search filters provided by an MCP client or LLM agent
  * - ParsedSearchQuery: legacy normalized pieces extracted from free-form user text
  * - TourSearchResult: stable payload returned from the eto.travel search flow
+ * - TourSelectionCategory: presentation bucket for multi-option MCP responses
+ * - TourSearchCollection: grouped list of tour options for richer recommendations
  * - TourSearchClient: integration contract for any search backend
  */
 
@@ -48,7 +50,15 @@ export interface TourSearchResult {
   source: 'ui';
 }
 
+// Категории позволяют агенту красиво объяснить, зачем каждая карточка попала в подборку.
+export type TourSelectionCategory = 'budget' | 'optimal' | 'premium';
+
+export interface TourSearchCollection {
+  tours: Array<TourSearchResult & { category: TourSelectionCategory }>;
+}
+
 // Контракт позволяет тестировать MCP-обработчик без реального браузера.
 export interface TourSearchClient {
   searchAnyTour(input: TourSearchInput): Promise<TourSearchResult>;
+  searchTourOptions?(input: TourSearchInput): Promise<TourSearchCollection>;
 }
