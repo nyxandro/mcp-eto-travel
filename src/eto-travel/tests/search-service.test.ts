@@ -71,6 +71,29 @@ describe('EtoTravelSearchService', () => {
 
     expect(browserLauncher.pageState.gotoCalls).toBe(1);
   });
+
+  it('skips destination-mismatched cards and fails instead of returning another resort', async () => {
+    // Нерелевантную карточку по Ессентукам нельзя возвращать, если пользователь явно искал Сочи.
+    const browserLauncher = new FakeBrowserLauncher(createBaseSelectorMap(), {
+      '.TVSResultItemTitle': 'Комфорт',
+      '.TVSResultItemSubTitle': 'Ессентуки, Кав. Мин. Воды',
+      '.TVSResultItemDescription': 'Санаторий в центре курорта',
+      '.TVCountrySelectTooltip .TVComplexListItem': 'Сочи',
+      '.TVDepartureTableItemControl': 'Москва'
+    });
+    const service = new EtoTravelSearchService(browserLauncher);
+
+    await expect(
+      service.searchAnyTour({
+        destination: 'Сочи',
+        departureCity: 'Москва',
+        adults: 2,
+        nights: 7,
+        month: 'апрель',
+        rawQuery: 'найти тур в Сочи на двоих на неделю в апреле из Москвы'
+      })
+    ).rejects.toThrow('No complete tour cards were found in search results');
+  });
 });
 
 function createBaseSelectorMap(): Record<string, number> {
@@ -112,11 +135,14 @@ class FakeBrowserLauncher implements BrowserLauncher {
     gotoCalls: 0
   };
 
-  constructor(private readonly selectorCounts: Record<string, number>) {}
+  constructor(
+    private readonly selectorCounts: Record<string, number>,
+    private readonly textOverrides: Record<string, string> = {}
+  ) {}
 
   async launch(): Promise<BrowserContextHandle> {
     return {
-      page: new FakeBrowserPage(this.selectorCounts, this.pageState),
+      page: new FakeBrowserPage(this.selectorCounts, this.pageState, this.textOverrides),
       async close(): Promise<void> {
         // Пустой close достаточен для unit/integration-like проверки orchestration-логики.
       }
@@ -132,7 +158,8 @@ class FakeBrowserPage implements BrowserPage {
       clickCalls: string[];
       totalWaitMs: number;
       gotoCalls: number;
-    }
+    },
+    private readonly textOverrides: Record<string, string>
   ) {}
 
   async goto(): Promise<void> {
@@ -146,7 +173,7 @@ class FakeBrowserPage implements BrowserPage {
   async waitForSelector(): Promise<void> {}
 
   locator(selector: string): BrowserLocator {
-    return new FakeLocator(selector, this.selectorCounts, this.pageState);
+    return new FakeLocator(selector, this.selectorCounts, this.pageState, this.textOverrides);
   }
 }
 
@@ -159,7 +186,8 @@ class FakeLocator implements BrowserLocator {
       clickCalls: string[];
       totalWaitMs: number;
       gotoCalls: number;
-    }
+    },
+    private readonly textOverrides: Record<string, string>
   ) {}
 
   async count(): Promise<number> {
@@ -168,11 +196,11 @@ class FakeLocator implements BrowserLocator {
   }
 
   first(): BrowserElement {
-    return new FakeElement(this.selector, this.selectorCounts, this.pageState);
+    return new FakeElement(this.selector, this.selectorCounts, this.pageState, this.textOverrides);
   }
 
   nth(): BrowserElement {
-    return new FakeElement(this.selector, this.selectorCounts, this.pageState);
+    return new FakeElement(this.selector, this.selectorCounts, this.pageState, this.textOverrides);
   }
 }
 
@@ -185,7 +213,8 @@ class FakeElement implements BrowserElement {
       clickCalls: string[];
       totalWaitMs: number;
       gotoCalls: number;
-    }
+    },
+    private readonly textOverrides: Record<string, string>
   ) {}
 
   async click(): Promise<void> {
@@ -198,6 +227,12 @@ class FakeElement implements BrowserElement {
 
   async textContent(): Promise<string | null> {
     // Возвращаем реальные поля под фактические live-селекторы результата и popup-элементов.
+    const overrideValue = this.textOverrides[this.selector];
+
+    if (overrideValue) {
+      return overrideValue;
+    }
+
     if (this.selector.includes('PriceValue')) {
       return '29 027';
     }
@@ -227,6 +262,10 @@ class FakeElement implements BrowserElement {
     }
 
     if (this.selector.includes('ComplexListItem')) {
+      if (this.textOverrides[this.selector]) {
+        return this.textOverrides[this.selector];
+      }
+
       return 'ТурцияАэропортАнталья';
     }
 
@@ -274,6 +313,6 @@ class FakeElement implements BrowserElement {
       nextCounts['calendar-panel-april'] = 1;
     }
 
-    return new FakeLocator(childSelector, nextCounts, this.pageState);
+    return new FakeLocator(childSelector, nextCounts, this.pageState, this.textOverrides);
   }
 }

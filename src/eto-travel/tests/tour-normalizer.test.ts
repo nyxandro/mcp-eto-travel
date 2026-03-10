@@ -60,4 +60,28 @@ describe('normalizeTourResult', () => {
       })
     ).toThrow('Tour result link is required');
   });
+
+  it('rejects tours that do not match the requested destination', () => {
+    // Если пользователь ищет Сочи, результат по Ессентукам нельзя считать валидным даже при совпадении остальных фильтров.
+    expect(() =>
+      normalizeTourResult({
+        title: 'Комфорт',
+        hotelName: 'Комфорт',
+        priceText: '28 972 RUB',
+        dateText: 'Ессентуки, Кав. Мин. Воды',
+        ratingText: '4.5',
+        descriptionText: 'Санаторий в центре курорта',
+        imageUrl: 'https://example.com/hotel.jpg',
+        href: '/tour/456',
+        appliedFilters: {
+          destination: 'Сочи',
+          departureCity: 'Москва',
+          adults: 2,
+          nights: 7,
+          month: 'апрель'
+        },
+        relaxedFilters: ['month']
+      })
+    ).toThrow('Tour result does not match requested destination: Сочи');
+  });
 });

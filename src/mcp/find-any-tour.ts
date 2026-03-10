@@ -2,14 +2,43 @@
  * TOC:
  * - createFindAnyTourHandler: builds the MCP tool handler for structured tour search
  * - buildTourCardText: formats a user-friendly tour card for plain-text MCP clients
+ * - validateSearchInput: checks whether critical search fields are present before UI automation starts
+ * - ToolContext: typed MCP tool context with optional logging helper from the SDK runtime
  */
 
+import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
 
 import type { TourSearchClient, TourSearchInput, TourSearchResult } from '../shared/types.js';
 
+const SEARCH_START_MESSAGE = 'Начинаю поиск тура: это может занять около 1 минуты.';
+const CRITICAL_FIELD_LABELS = {
+  destination: 'страну, город или курорт назначения',
+  departureCity: 'город вылета',
+  adults: 'количество взрослых'
+} as const;
+
+type ToolContext = RequestHandlerExtra<ServerRequest, ServerNotification> & {
+  mcpReq?: {
+    log?: (level: string, message: string) => Promise<void>;
+  };
+};
+
 export function createFindAnyTourHandler(searchClient: TourSearchClient) {
-  return async (input: TourSearchInput): Promise<CallToolResult> => {
+  return async (input: TourSearchInput, context: ToolContext): Promise<CallToolResult> => {
+    // Сначала валидируем обязательные для осмысленного подбора поля, чтобы не делать дорогой UI-поиск вслепую.
+    const validationError = validateSearchInput(input);
+
+    if (validationError) {
+      return validationError;
+    }
+
+    // Лог в MCP-клиент позволяет пользователю сразу увидеть, что длительный поиск уже начался.
+    if (context?.mcpReq?.log) {
+      await context.mcpReq.log('info', SEARCH_START_MESSAGE);
+    }
+
     // MCP-слой принимает уже структурированные поля, чтобы LLM заполняла их явно и предсказуемо.
     const tour = await searchClient.searchAnyTour(input);
     const text = buildTourCardText(tour);
@@ -32,6 +61,42 @@ export function createFindAnyTourHandler(searchClient: TourSearchClient) {
       }
     };
   };
+}
+
+function validateSearchInput(input: TourSearchInput): CallToolResult | null {
+  // Проверяем только критичные поля, без которых подбор слишком неточный и может ввести клиента в заблуждение.
+  const missingFields: string[] = [];
+
+  if (!hasMeaningfulText(input.destination)) {
+    missingFields.push(CRITICAL_FIELD_LABELS.destination);
+  }
+
+  if (!hasMeaningfulText(input.departureCity)) {
+    missingFields.push(CRITICAL_FIELD_LABELS.departureCity);
+  }
+
+  if (!Number.isInteger(input.adults) || input.adults === null || input.adults <= 0) {
+    missingFields.push(CRITICAL_FIELD_LABELS.adults);
+  }
+
+  if (!missingFields.length) {
+    return null;
+  }
+
+  return {
+    content: [
+      {
+        type: 'text',
+        text: `Уточните, пожалуйста: ${missingFields.join(', ')}. После этого сразу начну поиск тура.`
+      }
+    ],
+    isError: true
+  };
+}
+
+function hasMeaningfulText(value: string | null): boolean {
+  // Пустые строки от LLM или клиента считаем отсутствующим значением, чтобы не запускать поиск с мусорным фильтром.
+  return typeof value === 'string' && value.trim().length > 0;
 }
 
 function buildTourCardText(tour: TourSearchResult): string {
